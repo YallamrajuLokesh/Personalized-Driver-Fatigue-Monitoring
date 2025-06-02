@@ -1,0 +1,31 @@
+# Node modules
+node_modules/
+
+# Environment variables
+.env
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Log files
+*.log
+
+# Model and large files (downloadable elsewhere)
+shape_predictor_68_face_landmarks.dat
+alarm.wav
+
+# Build output (if any)
+dist/
+build/
+
+
+
+
+# System files
+.DS_Store
+Thumbs.db
+
+# Editor folders
+.vscode/
+.idea/

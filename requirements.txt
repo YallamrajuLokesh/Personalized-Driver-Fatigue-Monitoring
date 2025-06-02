@@ -1,0 +1,10 @@
+Flask==3.0.3
+flask-cors==4.0.0
+pymongo==4.7.2
+python-dotenv==1.0.1
+bson==0.5.10
+opencv-python==4.8.1.78
+dlib==19.24.2
+numpy==1.24.3
+scipy==1.11.1
+pygame==2.5.0
