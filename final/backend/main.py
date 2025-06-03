@@ -7,13 +7,50 @@ import time
 import os
 import math
 import json
+import requests  # Add this import at the top
 
 # --- JSON Logging Config ---
-STATUS_FILE = "status.json"
-ALERTS_FILE = "alerts.json"
-PROFILES_FILE = "profiles.json" # New: for user profiles
+# Add base path resolution
+BACKEND_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_DIR = os.path.join(BACKEND_DIR, 'data')
+MODELS_DIR = os.path.join(BACKEND_DIR, 'models')
+STATIC_DIR = os.path.join(BACKEND_DIR, 'static')
+
+# Create directories if they don't exist
+os.makedirs(DATA_DIR, exist_ok=True)
+os.makedirs(MODELS_DIR, exist_ok=True)
+os.makedirs(STATIC_DIR, exist_ok=True)
+
+# Update file paths
+STATUS_FILE = os.path.join(DATA_DIR, "status.json")
+ALERTS_FILE = os.path.join(DATA_DIR, "alerts.json")
+PROFILES_FILE = os.path.join(DATA_DIR, "profiles.json")
+ALARM_FILE = os.path.join(STATIC_DIR, "alarm.wav")
+PREDICTOR_FILE = os.path.join(MODELS_DIR, "shape_predictor_68_face_landmarks.dat")
 
 def write_status(status):
+    # Update status with proper None values when face is not detected
+    if not faces:  # 'faces' should be accessible in this scope
+        status.update({
+            "ear": None,
+            "mar": None,
+            "mouth_area": None,
+            "mouth_ratio": None,
+            "pitch": None,
+            "yaw": None,
+            "roll": None
+        })
+    
+    # Always include calibration values even when face is not detected
+    if current_user_profile and current_user_profile in profiles:
+        profile_data = profiles[current_user_profile]
+        status.update({
+            "EAR_THRESHOLD": float(profile_data.get("EAR_THRESHOLD", 0.21)),
+            "MAR_THRESHOLD": float(profile_data.get("MAR_THRESHOLD", 0.75)),
+            "NEUTRAL_PITCH": float(profile_data.get("NEUTRAL_PITCH", 0)) if profile_data.get("NEUTRAL_PITCH") is not None else None,
+            "NEUTRAL_ROLL": float(profile_data.get("NEUTRAL_ROLL", 0)) if profile_data.get("NEUTRAL_ROLL") is not None else None
+        })
+
     with open(STATUS_FILE, "w") as f:
         json.dump(status, f)
 
@@ -40,7 +77,71 @@ def save_profiles(profiles):
     with open(PROFILES_FILE, "w") as f:
         json.dump(profiles, f, indent=4)
 
-profiles = load_profiles()
+def get_logged_in_account():
+    """
+    Try to get the logged-in account from a local file (set by the web dashboard after login).
+    Returns the email/username if available, else None.
+    """
+    try:
+        with open("logged_in_account.txt", "r") as f:
+            return f.read().strip()
+    except Exception:
+        return None
+
+def set_logged_in_account(username):
+    with open("logged_in_account.txt", "w") as f:
+        f.write(username)
+
+def clear_logged_in_account():
+    if os.path.exists("logged_in_account.txt"):
+        os.remove("logged_in_account.txt")
+
+def fetch_profiles_from_backend(account_username):
+    try:
+        resp = requests.get(f"http://127.0.0.1:5000/profiles?account={account_username}")
+        if resp.ok:
+            return resp.json()
+    except Exception as e:
+        print("Could not fetch profiles from backend:", e)
+    return []
+
+def create_profile_backend(account_username, profile_name):
+    try:
+        resp = requests.post("http://127.0.0.1:5000/profiles/create", json={
+            "account_username": account_username,
+            "profile_name": profile_name
+        })
+        if resp.ok:
+            print(f"Profile '{profile_name}' created in backend.")
+            return True
+        else:
+            print("Backend error:", resp.text)
+    except Exception as e:
+        print("Could not create profile in backend:", e)
+    return False
+
+def select_profile_backend(account_username, profile_name):
+    try:
+        resp = requests.post("http://127.0.0.1:5000/profiles/select", json={
+            "account_username": account_username,
+            "profile_name": profile_name
+        })
+        if resp.ok:
+            print(f"Profile '{profile_name}' selected in backend.")
+            return True
+        else:
+            print("Backend error:", resp.text)
+    except Exception as e:
+        print("Could not select profile in backend:", e)
+    return False
+
+profiles = {}
+try:
+    with open(PROFILES_FILE, "r") as f:
+        profiles = json.load(f)
+except (FileNotFoundError, json.JSONDecodeError):
+    profiles = {}
+
 current_user_profile = None
 
 # --- Constants (Default values, will be overridden by profile) ---
@@ -77,7 +178,13 @@ calibration_phase = 0 # 0: None, 1: EAR, 2: MAR, 3: Pitch/Roll
 CALIBRATION_TOTAL_FRAMES = 60 # Number of frames for each calibration step
 
 # --- Alarm ---
-ALARM_FILE = "alarm.wav"
+# Initialize pygame with proper error handling
+pygame.mixer.init()
+if os.path.exists(ALARM_FILE):
+    pygame.mixer.music.load(ALARM_FILE)
+else:
+    print(f"Warning: Alarm file not found at {ALARM_FILE}")
+    print("Please download an alarm.wav file and place it in the backend/static directory")
 
 # Head tilt detection parameters
 head_tilt_counter = 0
@@ -162,11 +269,19 @@ pygame.mixer.init()
 if os.path.exists(ALARM_FILE):
     pygame.mixer.music.load(ALARM_FILE)
 else:
-    print(f"Alarm file not found at {os.path.abspath(ALARM_FILE)}")
+    print(f"Warning: Alarm file not found at {ALARM_FILE}")
+    print("Please download an alarm.wav file and place it in the backend/static directory")
 
-# Initialize dlib
+# Initialize dlib with proper error handling
 detector = dlib.get_frontal_face_detector()
-predictor = dlib.shape_predictor("shape_predictor_68_face_landmarks.dat")
+if os.path.exists(PREDICTOR_FILE):
+    predictor = dlib.shape_predictor(PREDICTOR_FILE)
+else:
+    print(f"Error: Shape predictor file not found at {PREDICTOR_FILE}")
+    print("Please download the file from:")
+    print("http://dlib.net/files/shape_predictor_68_face_landmarks.dat.bz2")
+    print("Extract it and place in the backend/models directory")
+    exit(1)
 
 def eye_aspect_ratio(eye):
     A = distance.euclidean(eye[1], eye[5])
@@ -204,65 +319,174 @@ last_mouth_area = 0
 last_mouth_ratio = 0
 
 # --- User Profile Selection Loop ---
+def login_account_backend(email, password):
+    try:
+        resp = requests.post("http://127.0.0.1:5000/account/login", json={
+            "username": email,
+            "password": password
+        })
+        if resp.ok:
+            print("Login successful.")
+            return True
+        else:
+            print("Login failed:", resp.json().get("error", resp.text))
+    except Exception as e:
+        print("Could not connect to backend for login:", e)
+    return False
+
 def select_user_profile():
     global current_user_profile, EAR_THRESHOLD, MAR_THRESHOLD, NEUTRAL_PITCH, NEUTRAL_ROLL
 
-    while True:
-        print("\n--- User Profile Management ---")
-        print("1. Create New User Profile")
-        if profiles: # Only show if there are existing profiles
-            print("2. Load Existing User Profile")
-        print("Q. Quit Application")
+    # Prompt for login if not already logged in
+    account_username = get_logged_in_account()
+    if not account_username:
+        print("\n--- Login Required ---")
+        while True:
+            email = input("Enter your account email: ").strip()
+            password = input("Enter your password: ").strip()
+            if login_account_backend(email, password):
+                set_logged_in_account(email)
+                account_username = email
+                break
+            else:
+                print("Invalid credentials. Try again or Ctrl+C to exit.")
 
-        choice = input("Enter your choice: ").strip().lower()
-
-        if choice == '1':
-            username = input("Enter new username: ").strip()
-            if username in profiles:
-                print(f"Profile '{username}' already exists. Please choose a different name or load it.")
-                continue
-            profiles[username] = {
-                "EAR_THRESHOLD": 0.21, # Default until calibrated
-                "MAR_THRESHOLD": 0.75, # Default until calibrated
-                "NEUTRAL_PITCH": None,
-                "NEUTRAL_ROLL": None
-            }
-            current_user_profile = username
-            save_profiles(profiles)
-            print(f"Profile '{username}' created. Please proceed to calibration.")
-            return True # Proceed to calibration
-        elif choice == '2' and profiles:
-            print("\nExisting Profiles:")
-            for i, user in enumerate(profiles.keys()):
-                print(f"{i+1}. {user}")
-            user_choice = input("Enter number of profile to load: ").strip()
-            try:
-                user_index = int(user_choice) - 1
-                if 0 <= user_index < len(profiles):
-                    username = list(profiles.keys())[user_index]
+    if account_username:
+        print(f"\nDetected logged-in account: {account_username}")
+        # Fetch profiles from backend for this account
+        backend_profiles = fetch_profiles_from_backend(account_username)
+        # Sync backend profiles to local profiles.json
+        for pname in backend_profiles:
+            if pname not in profiles:
+                profiles[pname] = {
+                    "EAR_THRESHOLD": 0.21,
+                    "MAR_THRESHOLD": 0.75,
+                    "NEUTRAL_PITCH": None,
+                    "NEUTRAL_ROLL": None
+                }
+        save_profiles(profiles)
+        # Let user select or create profile for this account
+        while True:
+            print("\n--- User Profile Management (Account: {}) ---".format(account_username))
+            print("1. Create New User Profile")
+            if backend_profiles:
+                print("2. Load Existing User Profile")
+            print("Q. Quit Application")
+            choice = input("Enter your choice: ").strip().lower()
+            if choice == '1':
+                username = input("Enter new profile name: ").strip()
+                if username in profiles:
+                    print(f"Profile '{username}' already exists locally. Please choose a different name or load it.")
+                    continue
+                # Create in backend
+                if create_profile_backend(account_username, username):
+                    profiles[username] = {
+                        "EAR_THRESHOLD": 0.21,
+                        "MAR_THRESHOLD": 0.75,
+                        "NEUTRAL_PITCH": None,
+                        "NEUTRAL_ROLL": None
+                    }
+                    save_profiles(profiles)
                     current_user_profile = username
-                    user_data = profiles[username]
-                    EAR_THRESHOLD = user_data.get("EAR_THRESHOLD", 0.21)
-                    MAR_THRESHOLD = user_data.get("MAR_THRESHOLD", 0.75)
-                    NEUTRAL_PITCH = user_data.get("NEUTRAL_PITCH")
-                    NEUTRAL_ROLL = user_data.get("NEUTRAL_ROLL")
-                    print(f"Profile '{username}' loaded.")
-                    return True # Proceed to detection
+                    select_profile_backend(account_username, username)
+                    print(f"Profile '{username}' created and selected. Please proceed to calibration.")
+                    return True
                 else:
-                    print("Invalid profile number.")
-            except ValueError:
-                print("Invalid input. Please enter a number.")
-        elif choice == 'q':
-            print("Exiting application.")
-            return False # Exit
-        else:
-            print("Invalid choice.")
+                    print("Failed to create profile in backend.")
+            elif choice == '2' and backend_profiles:
+                print("\nExisting Profiles:")
+                for i, user in enumerate(backend_profiles):
+                    print(f"{i+1}. {user}")
+                user_choice = input("Enter number of profile to load: ").strip()
+                try:
+                    user_index = int(user_choice) - 1
+                    if 0 <= user_index < len(backend_profiles):
+                        username = backend_profiles[user_index]
+                        current_user_profile = username
+                        user_data = profiles.get(username, {})
+                        EAR_THRESHOLD = user_data.get("EAR_THRESHOLD", 0.21)
+                        MAR_THRESHOLD = user_data.get("MAR_THRESHOLD", 0.75)
+                        NEUTRAL_PITCH = user_data.get("NEUTRAL_PITCH")
+                        NEUTRAL_ROLL = user_data.get("NEUTRAL_ROLL")
+                        select_profile_backend(account_username, username)
+                        print(f"Profile '{username}' loaded and selected in backend.")
+                        return True
+                    else:
+                        print("Invalid profile number.")
+                except ValueError:
+                    print("Invalid input. Please enter a number.")
+            elif choice == 'q':
+                print("Exiting application.")
+                return False
+            else:
+                print("Invalid choice.")
+    else:
+        # Fallback to old local-only logic if not logged in via web
+        while True:
+            print("\n--- User Profile Management ---")
+            print("1. Create New User Profile")
+            if profiles:
+                print("2. Load Existing User Profile")
+            print("Q. Quit Application")
+            choice = input("Enter your choice: ").strip().lower()
+            if choice == '1':
+                username = input("Enter new username: ").strip()
+                if username in profiles:
+                    print(f"Profile '{username}' already exists. Please choose a different name or load it.")
+                    continue
+                profiles[username] = {
+                    "EAR_THRESHOLD": 0.21,
+                    "MAR_THRESHOLD": 0.75,
+                    "NEUTRAL_PITCH": None,
+                    "NEUTRAL_ROLL": None
+                }
+                current_user_profile = username
+                save_profiles(profiles)
+                print(f"Profile '{username}' created. Please proceed to calibration.")
+                return True
+            elif choice == '2' and profiles:
+                print("\nExisting Profiles:")
+                for i, user in enumerate(profiles.keys()):
+                    print(f"{i+1}. {user}")
+                user_choice = input("Enter number of profile to load: ").strip()
+                try:
+                    user_index = int(user_choice) - 1
+                    if 0 <= user_index < len(profiles):
+                        username = list(profiles.keys())[user_index]
+                        current_user_profile = username
+                        user_data = profiles[username]
+                        EAR_THRESHOLD = user_data.get("EAR_THRESHOLD", 0.21)
+                        MAR_THRESHOLD = user_data.get("MAR_THRESHOLD", 0.75)
+                        NEUTRAL_PITCH = user_data.get("NEUTRAL_PITCH")
+                        NEUTRAL_ROLL = user_data.get("NEUTRAL_ROLL")
+                        print(f"Profile '{username}' loaded.")
+                        return True
+                    else:
+                        print("Invalid profile number.")
+                except ValueError:
+                    print("Invalid input. Please enter a number.")
+            elif choice == 'q':
+                print("Exiting application.")
+                return False
+            else:
+                print("Invalid choice.")
 
 if not select_user_profile():
     cap.release()
     cv2.destroyAllWindows()
     pygame.mixer.quit()
     exit()
+
+def countdown_before_calibration(frame):
+    for i in range(3, 0, -1):
+        temp_frame = frame.copy()
+        cv2.putText(temp_frame, f"Calibration starting in {i}...", 
+                    (10, 300), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2)
+        cv2.imshow("Driver Fatigue Detection", temp_frame)
+        key = cv2.waitKey(1000) # Wait 1 second
+        if key & 0xFF == ord('q'):
+            return False
+    return True
 
 # --- Main loop starts here after profile selection ---
 while True:
@@ -282,11 +506,14 @@ while True:
                                  profiles[current_user_profile].get("NEUTRAL_PITCH") is None or \
                                  profiles[current_user_profile].get("NEUTRAL_ROLL") is None):
 
-        if calibration_phase == 0: # Start calibration sequence if not already set
-            calibration_phase = 1 # Start with EAR calibration
+        if calibration_phase == 0:  # Start calibration sequence if not already set
+            # Add countdown
+            if not countdown_before_calibration(frame):
+                break
+            calibration_phase = 1
             calibration_frames = 0
-            calibration_ear_max = 0 # Reset for new calibration run
-            calibration_mar_max = 0 # Reset for new calibration run
+            calibration_ear_max = 0
+            calibration_mar_max = 0
             calibration_pitch_sum = 0
             calibration_roll_sum = 0
             print(f"Starting calibration for user: {current_user_profile}")
@@ -386,7 +613,23 @@ while True:
                     profiles[current_user_profile]["NEUTRAL_PITCH"] = NEUTRAL_PITCH
                     profiles[current_user_profile]["NEUTRAL_ROLL"] = NEUTRAL_ROLL
                     save_profiles(profiles)
-                    print(f"Pitch/Roll Calibration complete. Neutral Pitch: {NEUTRAL_PITCH:.2f}, Neutral Roll: {NEUTRAL_ROLL:.2f}")
+                    
+                    # Save calibration to MongoDB
+                    try:
+                        requests.post('http://127.0.0.1:5000/profiles/update_calibration', json={
+                            'account_username': account_username,
+                            'profile_name': current_user_profile,
+                            'calibration': {
+                                'EAR_THRESHOLD': EAR_THRESHOLD,
+                                'MAR_THRESHOLD': MAR_THRESHOLD,
+                                'NEUTRAL_PITCH': NEUTRAL_PITCH,
+                                'NEUTRAL_ROLL': NEUTRAL_ROLL
+                            }
+                        })
+                    except Exception as e:
+                        print("Failed to save calibration to backend:", e)
+                        
+                    print(f"Calibration complete and saved to backend.")
                     calibration_phase = 0 # Calibration finished
 
         cv2.putText(frame, calibration_message, (10, 350), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
@@ -621,25 +864,30 @@ while True:
     # Prepare status dictionary with default values if face not detected to avoid KeyError
     status = {
         "current_user": current_user_profile,
-        "ear": float(ear) if 'ear' in locals() and faces else 0.0,
-        "mar": float(mar) if 'mar' in locals() and faces else 0.0,
-        "mouth_area": float(mouth_area) if 'mouth_area' in locals() and faces else 0.0,
-        "mouth_ratio": float(mouth_ratio) if 'mouth_ratio' in locals() and faces else 0.0,
-        "pitch": float(pitch) if 'pitch' in locals() and faces else 0.0,
-        "yaw": float(yaw) if 'yaw' in locals() and faces else 0.0,
-        "roll": float(roll) if 'roll' in locals() and faces else 0.0,
+        "ear": float(ear) if 'ear' in locals() and faces else None,
+        "mar": float(mar) if 'mar' in locals() and faces else None,
+        "mouth_area": float(mouth_area) if 'mouth_area' in locals() and faces else None,
+        "mouth_ratio": float(mouth_ratio) if 'mouth_ratio' in locals() and faces else None,
+        "pitch": float(pitch) if 'pitch' in locals() and faces else None,
+        "yaw": float(yaw) if 'yaw' in locals() and faces else None,
+        "roll": float(roll) if 'roll' in locals() and faces else None,
         "eye_alarm": eye_alarm_on,
         "yawn_alarm": yawn_alarm_on,
         "pitch_alarm": pitch_alarm_on,
         "yaw_alarm": yaw_alarm_on,
-        "head_tilt_alarm": head_tilt_alarm_on,
-        "EAR_THRESHOLD": float(EAR_THRESHOLD),
-        "MAR_THRESHOLD": float(MAR_THRESHOLD),
-        "HEAD_TILT_THRESHOLD": float(HEAD_TILT_THRESHOLD),
-        "NEUTRAL_PITCH": float(NEUTRAL_PITCH) if NEUTRAL_PITCH is not None else None,
-        "NEUTRAL_ROLL": float(NEUTRAL_ROLL) if NEUTRAL_ROLL is not None else None
+        "head_tilt_alarm": head_tilt_alarm_on
     }
-    
+
+    # Add calibration values from profile
+    if current_user_profile and current_user_profile in profiles:
+        profile_data = profiles[current_user_profile]
+        status.update({
+            "EAR_THRESHOLD": float(profile_data.get("EAR_THRESHOLD", 0.21)),
+            "MAR_THRESHOLD": float(profile_data.get("MAR_THRESHOLD", 0.75)),
+            "NEUTRAL_PITCH": float(profile_data.get("NEUTRAL_PITCH", 0)) if profile_data.get("NEUTRAL_PITCH") is not None else None,
+            "NEUTRAL_ROLL": float(profile_data.get("NEUTRAL_ROLL", 0)) if profile_data.get("NEUTRAL_ROLL") is not None else None
+        })
+
     # Load previous status to detect transitions for alerts
     try:
         with open(STATUS_FILE, "r") as f:
@@ -650,18 +898,49 @@ while True:
     write_status(status)
 
     # Log alerts only on transition from non-alarm to alarm state
+    account_username = get_logged_in_account()
     if eye_alarm_on and not prev_status.get("eye_alarm", False):
-        append_alert({"type": "Drowsiness", "time": time.strftime("%H:%M:%S"), "value": round(status["ear"], 2)})
+        append_alert({
+            "type": "Drowsiness", 
+            "time": time.strftime("%H:%M:%S"), 
+            "value": round(status["ear"], 2),
+            "username": current_user_profile,
+            "account": account_username
+        })
     if yawn_alarm_on and not prev_status.get("yawn_alarm", False):
-        append_alert({"type": "Yawn", "time": time.strftime("%H:%M:%S"), "value": round(status["mar"], 2)})
+        append_alert({
+            "type": "Yawn", 
+            "time": time.strftime("%H:%M:%S"), 
+            "value": round(status["mar"], 2),
+            "username": current_user_profile,
+            "account": account_username
+        })
     if pitch_alarm_on and not prev_status.get("pitch_alarm", False):
-        alert_type = "Head Up" if (status["pitch"] - status.get("NEUTRAL_PITCH", 0)) > 0 else "Head Down" # Use relative pitch for type
-        append_alert({"type": alert_type, "time": time.strftime("%H:%M:%S"), "value": round(status["pitch"], 2)})
+        alert_type = "Head Up" if (status["pitch"] - status.get("NEUTRAL_PITCH", 0)) > 0 else "Head Down"
+        append_alert({
+            "type": alert_type, 
+            "time": time.strftime("%H:%M:%S"), 
+            "value": round(status["pitch"], 2),
+            "username": current_user_profile,
+            "account": account_username
+        })
     if yaw_alarm_on and not prev_status.get("yaw_alarm", False):
         alert_type = "Looking Right" if status["yaw"] > 0 else "Looking Left"
-        append_alert({"type": alert_type, "time": time.strftime("%H:%M:%S"), "value": round(status["yaw"], 2)})
+        append_alert({
+            "type": alert_type, 
+            "time": time.strftime("%H:%M:%S"), 
+            "value": round(status["yaw"], 2),
+            "username": current_user_profile,
+            "account": account_username
+        })
     if head_tilt_alarm_on and not prev_status.get("head_tilt_alarm", False):
-        append_alert({"type": "Head Tilt", "time": time.strftime("%H:%M:%S"), "value": round(status["roll"], 2)})
+        append_alert({
+            "type": "Head Tilt", 
+            "time": time.strftime("%H:%M:%S"), 
+            "value": round(status["roll"], 2),
+            "username": current_user_profile,
+            "account": account_username
+        })
 
 
     cv2.imshow("Driver Fatigue Detection", frame)
